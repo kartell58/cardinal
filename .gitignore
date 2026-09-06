@@ -1,0 +1,18 @@
+# Build output
+build/
+.gradle/
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime
+*.log
+*.pid
+out/

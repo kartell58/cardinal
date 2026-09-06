@@ -1,0 +1,47 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'io.github.kartell58'
+version = '0.1.0'
+
+description = 'Cardinal - an independent, compact Java bytecode decompiler'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'io.github.kartell58.cardinal.Main'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+    options.compilerArgs.addAll(['-Xlint:none'])
+}
+
+jar {
+    archiveBaseName = 'cardinal'
+    manifest {
+        attributes(
+            'Implementation-Title': 'cardinal',
+            'Implementation-Version': project.version,
+            'Main-Class': application.mainClass.get()
+        )
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
