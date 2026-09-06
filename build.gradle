@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'io.github.kartell58'
-version = '0.1.0'
+version = '0.1.1'
 
 description = 'Cardinal - an independent, compact Java bytecode decompiler'
 

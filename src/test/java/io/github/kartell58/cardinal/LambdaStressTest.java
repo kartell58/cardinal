@@ -100,6 +100,15 @@ class LambdaStressTest {
         assertTrue(src.contains("reduce(\"\""), src);
     }
 
+    @Test
+    void tryFinallyLambdaReconstructed() throws Exception {
+        String src = decompile(fixture("DecompileStress.java"), true);
+        assertTrue(src.contains("try {"), () -> "try block missing:\n" + src);
+        assertTrue(src.contains("finally"), () -> "finally missing:\n" + src);
+        assertTrue(src.contains("return $v1"), () -> "try-body return missing:\n" + src);
+        assertFalse(src.contains("\u0001"), "captures must be substituted, not left as placeholders");
+    }
+
     // ===== helpers =====
 
     private static String fixture(String name) throws IOException {

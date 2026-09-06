@@ -14,8 +14,15 @@ public final class DecompileStress {
   }
 
   public static String run(String arg0, int arg1) throws Exception {
-    // lambda lambda$run$0: body has exception handlers; try/finally not reconstructed (safe null)
-    java.util.concurrent.Callable v0 = null;
+    java.util.concurrent.Callable<String> v0 = () -> {
+      String $v0 = arg0.repeat(Math.max(1, arg1%4+1));
+      try {
+          String $v1 = transform($v0);
+          return $v1;
+      } finally {
+          CACHE.merge(arg0, Integer.valueOf(arg1), Integer::sum);
+      }
+    };
     return (String) v0.call();
   }
 
@@ -35,7 +42,7 @@ public final class DecompileStress {
           continue;
       case 1:
           v0 = v0^85;
-          v1 = v0+arg0&7;
+          v1 = (v0+arg0)&7;
           continue;
       case 2:
           v0 = v0*3;

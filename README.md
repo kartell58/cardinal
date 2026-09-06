@@ -121,7 +121,7 @@ public final class DecompileStress {
           continue;
       case 1:
           v0 = v0^85;
-          v1 = v0+arg0&7;
+          v1 = (v0+arg0)&7;
           continue;
       case 2:
           v0 = v0*3;
@@ -158,12 +158,11 @@ public final class DecompileStress {
 ```
 
 The emitted source recompiles cleanly and reproduces the original behaviour for
-`transform`, `obfuscatedFlow` and `genericStuff`.
+`transform`, `obfuscatedFlow`, `genericStuff` and `run`.
 
-**Known limitation:** `run()` contains a lambda whose body has a `try/finally`
-block. Cardinal does not yet reconstruct exception regions inside lambda bodies,
-so `run()` degrades to a typed `null` with a comment explaining the limitation.
-The remaining methods are decompiled faithfully.
+`run()` contains a lambda whose body has a `try/finally`: Cardinal reconstructs
+javac's duplicated-finally bytecode shape and renders it back as a real
+`try { ... } finally { ... }` inside the lambda, including captured variables.
 
 ## Releases
 

@@ -78,7 +78,9 @@ final class Sim {
 
         /** Left operand wraps when looser than p, right operand when looser or equal (left assoc). */
         static X bin(X a, String op, int p, X b) {
-            String t = wrap(a, p, false) + op + wrap(b, p, true);
+            boolean visible = (a.p == P_ADD || a.p == P_MUL || a.p == P_SHIFT)
+                    && (p == P_BAND || p == P_BXOR || p == P_BOR);
+            String t = (visible ? "(" + a.collapsed() + ")" : wrap(a, p, false)) + op + wrap(b, p, true);
             return new X(t, p, Math.max(a.w, b.w), 0);
         }
 
@@ -205,8 +207,17 @@ final class Sim {
     }
 
     private final Ctx ctx;
+    final Map<Integer, int[]> marks;
 
-    private Sim(Ctx ctx) { this.ctx = ctx; }
+    private Sim(Ctx ctx) { this(ctx, null); }
+
+    private Sim(Ctx ctx, Map<Integer, int[]> marks) {
+        this.ctx = ctx;
+        this.marks = marks;
+    }
+
+    /** Rendered method body plus the number of leading generated temp-declaration lines. */
+    record RenderedBody(String text, int pre) {}
 
     /** Renders the body of method {@code m} (lines at {@code indent}). */
     static String body(Cfg g, ClassFile cf, ClassFile.Method m, int indent) {
@@ -219,6 +230,17 @@ final class Sim {
      */
     static String body(Cfg g, ClassFile cf, ClassFile.Method m, int indent, String[] override,
             java.util.Map<String, ClassFile> siblings) {
+        return bodyR(g, cf, m, indent, override, siblings, null).text();
+    }
+
+    /**
+     * Like {@link #body(Cfg, ClassFile, Method, int, String[], Map)} but also returns the number of
+     * leading temp-declaration lines. When {@code marks} is non-null it is filled with the
+     * {@code [fromLine, toLine)} window (indexed within the non-temp body lines) that each bytecode
+     * pc's simulation produced, which lets callers slice the rendered text back onto bytecode ranges.
+     */
+    static RenderedBody bodyR(Cfg g, ClassFile cf, ClassFile.Method m, int indent, String[] override,
+            java.util.Map<String, ClassFile> siblings, Map<Integer, int[]> marks) {
         int maxLocals = m.code().maxLocals();
         boolean isStatic = (m.access() & ClassFile.ACC_STATIC) != 0;
         String[] parts = Types.method(m.desc());
@@ -248,18 +270,18 @@ final class Sim {
         String[] mp = Types.method(m.desc());
         String mret = psig != null ? psig[psig.length - 1] : mp[mp.length - 1];
         Sim sim = new Sim(new Ctx(g, cf, isStatic, names, types, decl,
-                mret, siblings, override != null ? "$" : ""));
+                mret, siblings, override != null ? "$" : ""), marks);
         Code code = new Code(indent);
         sim.doSeq(Struc.build(g), code);
 
-        List<String> out = new ArrayList<>(code.lines);
         List<String> pre = new ArrayList<>();
         for (var e : sim.ctx.temps.entrySet()) {
             pre.add("  ".repeat(indent) + e.getValue() + " $t" + e.getKey()
                     + " = " + zeroInit(e.getValue()) + ";");
         }
-        pre.addAll(out);
-        return String.join("\n", pre);
+        int nPre = pre.size();
+        pre.addAll(code.lines);
+        return new RenderedBody(String.join("\n", pre), nPre);
     }
 
     private static String zeroInit(String t) {
@@ -300,13 +322,24 @@ final class Sim {
         List<X> save = List.copyOf(ctx.st);
         for (int i = start; i <= end; i++) {
             Insn in = ctx.g.all.get(i);
+            int b0 = marks == null ? 0 : code.lines.size();
             if (in.op == Insn.GOTO || in.op == Insn.GOTO_W) {
                 handleGoto(in, save, code);
+                mark(in.pc, b0, code);
                 return;
             }
-            if (isCond(op(in)) && i == end) return;
-            if (sim(in, code)) return;
+            if (isCond(op(in)) && i == end) {
+                mark(in.pc, b0, code);
+                return;
+            }
+            boolean done = sim(in, code);
+            mark(in.pc, b0, code);
+            if (done) return;
         }
+    }
+
+    private void mark(int pc, int from, Code code) {
+        if (marks != null) marks.put(pc, new int[]{from, code.lines.size()});
     }
 
     private static int op(Insn in) { return in.op; }
@@ -867,19 +900,24 @@ final class Sim {
             code.line("// lambda " + iName + ": implementation not found (safe null)");
             return X.typ(X.v("null", 1), ret);
         }
-        if (sm.code().ex().length > 0) {
-            code.line("// lambda " + iName + ": body has exception handlers; try/finally not reconstructed (safe null)");
-            return X.typ(X.v("null", 1), ret);
-        }
 
         String[] parts = Types.method(iType);
         int nparams = parts.length - 1, ncap = nparams - declared;
         String[] over = new String[nparams];
         for (int i = 0; i < ncap; i++) over[i] = "\u0001C" + i;          // capture placeholders
         for (int i = ncap; i < nparams; i++) over[i] = "p" + (i - ncap); // declared params
-        Cfg bg = Cfg.build(Insn.decode(sm.code().bytes()));
+        List<Insn> insns = Insn.decode(sm.code().bytes());
+        Cfg bg = Cfg.build(insns);
+
+        if (sm.code().ex().length > 0) {
+            X t = tryFinally(parts, declared, ncap, over, bg, insns, sm, ret, real, caps);
+            if (t != null) return t;
+            code.line("// lambda " + iName + ": body has exception handlers; try/finally not reconstructed (safe null)");
+            return X.typ(X.v("null", 1), ret);
+        }
+
         String rendered = bg == null ? "" : body(bg, ctx.cf, sm, 0, over, ctx.siblings);
-        for (int i = ncap - 1; i >= 0 && i < caps.size(); i++) {
+        for (int i = ncap - 1; i >= 0 && i < caps.size(); i--) {
             if (caps.get(i) != null) rendered = rendered.replace("\u0001C" + i, caps.get(i).s);
         }
         String head = lambdaParams(parts, declared, ncap);
@@ -890,6 +928,101 @@ final class Sim {
         for (String l : rendered.split("\n", -1)) if (!l.isEmpty()) lines.add(l);
         if (lines.isEmpty()) return X.typ(X.v(head + " -> { }", 1), fty);
         return X.typ(X.block(head + " ->", lines, "}", 0, fty), fty);
+    }
+
+    /**
+     * Reconstructs {@code try { ... } finally { ... }} inside a lambda whose synthetic method uses
+     * javac's duplicated-finally shape: {@code [prologue | try-body | finally-copy | tail...]}
+     * guarded by a handler {@code astore N; finally-copy; aload N; athrow}. Returns null when the
+     * shape does not match, so the caller keeps its existing degradation.
+     */
+    private X tryFinally(String[] parts, int declared, int ncap, String[] over, Cfg bg,
+            List<Insn> insns, ClassFile.Method sm, String ret, List<String> real, List<X> caps) {
+        ClassFile.Ex prim = null;
+        for (ClassFile.Ex ex : sm.code().ex()) {
+            if (ex.catchType() != 0) continue;                                   // "any" = finally/athrow
+            if (ex.handler() >= ex.start() && ex.handler() < ex.end()) continue; // self-guard entry
+            if (prim == null || ex.end() - ex.start() > prim.end() - prim.start()) prim = ex;
+        }
+        if (prim == null || bg == null) return null;
+        Map<Integer, Integer> pcIdx = new HashMap<>();
+        for (int i = 0; i < insns.size(); i++) pcIdx.put(insns.get(i).pc, i);
+        Integer th = pcIdx.get(prim.handler());
+        if (th == null || !isAStore(insns.get(th).op)) return null;              // handler: astore N
+        int n = insns.get(th).var;
+        int fend = -1;
+        for (int k = th + 1; k + 1 < insns.size(); k++) {
+            if (isALoad(insns.get(k).op) && insns.get(k).var == n && insns.get(k + 1).op == Insn.ATHROW) {
+                fend = k;
+                break;
+            }
+        }
+        if (fend < 0) return null;
+        int L = fend - th - 1;                                                   // finally-block length
+        if (L <= 0) return null;
+        Integer tstart = pcIdx.get(prim.start()), tend = pcIdx.get(prim.end());
+        if (tstart == null || tend == null || tend <= tstart || tend + L > insns.size()) return null;
+        for (int k = 0; k < L; k++) {                                            // normal copy must match handler copy
+            Insn a = insns.get(tend + k), b = insns.get(th + 1 + k);
+            if (a.op != b.op || a.var != b.var || a.cpool != b.cpool || a.con != b.con) return null;
+        }
+
+        Map<Integer, int[]> marks = new java.util.LinkedHashMap<>();
+        RenderedBody rb = bodyR(bg, ctx.cf, sm, 0, over, ctx.siblings, marks);
+        String text = rb.text();
+        int preN = rb.pre();
+        for (int i = ncap - 1; i >= 0 && i < caps.size(); i--) {
+            if (caps.get(i) != null) text = text.replace("\u0001C" + i, caps.get(i).s);
+        }
+        String[] ls = text.split("\n", -1);
+        List<String> pro = new ArrayList<>(), tri = new ArrayList<>(), fin = new ArrayList<>(), post = new ArrayList<>();
+        for (Insn x : insns) {
+            int[] m = marks.get(x.pc);
+            if (m == null || m[1] <= m[0]) continue;
+            Integer ii = pcIdx.get(x.pc);
+            if (ii == null) continue;
+            List<String> tgt;
+            if (ii < tstart) tgt = pro;
+            else if (ii < tend) tgt = tri;
+            else if (ii < tend + L) tgt = fin;
+            else tgt = post;
+            for (int i = m[0]; i < m[1]; i++) tgt.add(ls[preN + i]);
+        }
+        if (tri.isEmpty() || fin.isEmpty()) return null;
+
+        // The normal path of javac's duplicated-finally shape ends with the finally copy followed by
+        // the try's own result-return (`aload temp; areturn`). That return belongs at the end of the
+        // try body, not after the finally. Route return-only trailing lines into the try.
+        boolean postIsReturn = !post.isEmpty();
+        for (String l : post) if (!l.trim().startsWith("return")) { postIsReturn = false; break; }
+        if (postIsReturn) { tri.addAll(post); post.clear(); }
+
+        List<String> out = new ArrayList<>();
+        out.addAll(pro);
+        out.add("try {");
+        for (String l : tri) out.add(ind(l, 2));
+        out.add("} finally {");
+        for (String l : fin) out.add(ind(l, 2));
+        out.add("}");
+        out.addAll(post);
+
+        String head = lambdaParams(parts, declared, ncap);
+        String fty = functionalType(ret, real);
+        List<String> lines = new ArrayList<>();
+        for (String l : String.join("\n", out).split("\n", -1)) if (!l.isEmpty()) lines.add(l);
+        return X.typ(X.block(head + " ->", lines, "}", 0, fty), fty);
+    }
+
+    private static boolean isAStore(int op) {
+        return op == Insn.ASTORE || (op >= Insn.ASTORE_0 && op <= Insn.ASTORE_3);
+    }
+
+    private static boolean isALoad(int op) {
+        return op == Insn.ALOAD || (op >= Insn.ALOAD_0 && op <= Insn.ALOAD_3);
+    }
+
+    private static String ind(String l, int n) {
+        return l.isEmpty() ? l : "  ".repeat(n) + l;
     }
 
     /** {@code (Type0 p0, Type1 p1)} for the {@code declared} params, typed from the synthetic method. */
